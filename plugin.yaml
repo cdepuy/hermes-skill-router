@@ -1,0 +1,9 @@
+name: skill_router
+version: 0.1.0
+description: "Jev-style pre-routing: a small local model (Laya) picks the right skill for each task."
+author: "Chris DePuy"
+kind: standalone
+provides_tools:
+  - skill_router_route
+provides_hooks:
+  - pre_llm_call

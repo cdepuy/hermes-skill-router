@@ -1,0 +1,24 @@
+name: skill_router
+# TODO(pin at publish): create the public repo, wait >= 2 weeks, then replace
+# this 40-char SHA with the exact release commit and re-verify capabilities
+# via hermes plugins doctor before submitting the catalog PR.
+repo: https://github.com/cdepuy/hermes-skill-router
+sha: "0000000000000000000000000000000000000000"
+subdir: ""
+description: >-
+  Pre-routes each task to the right skill with a local Laya model (421M
+  System-1) before the main model sees it. Reduces sessions "forgetting" to
+  load skills. Standalone plugin; user-message injection only (prompt-cache
+  safe), fail-open on any error.
+maintainer: Chris DePuy
+tier: community
+requires_hermes: ">=0.19"
+docs_url: ""
+platforms: [macos, linux]
+capabilities:
+  provides_tools:
+    - skill_router_route
+  provides_hooks:
+    - pre_llm_call
+  provides_middleware: []
+  requires_env: []
