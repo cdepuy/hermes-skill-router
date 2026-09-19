@@ -1,9 +1,10 @@
 name: skill_router
-# TODO(pin at publish): create the public repo, wait >= 2 weeks, then replace
-# this 40-char SHA with the exact release commit and re-verify capabilities
-# via hermes plugins doctor before submitting the catalog PR.
+# Pinned to the public release commit. Pin-maturity rule: submit the catalog
+# PR only after this commit is >= 2 weeks old (supply-chain policy). Capabilities
+# verified against the pinned commit via: hermes plugins doctor skill_router
+# (exactly 1 tool: skill_router_route + 1 hook: pre_llm_call).
 repo: https://github.com/cdepuy/hermes-skill-router
-sha: "0000000000000000000000000000000000000000"
+sha: "9047b1daec79f6bc036c4b8e2898d9e74fd7f407"
 subdir: ""
 description: >-
   Pre-routes each task to the right skill with a local Laya model (421M
