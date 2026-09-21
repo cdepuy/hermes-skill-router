@@ -16,11 +16,17 @@ relevant skill is in context deterministically — no "session forgot the skill"
 Config (plugins.entries.skill_router.settings.*):
   enabled:      bool  (default true)
   top_n:        int   (default 2)     skills to route
-  floor:        float (default 0.25)  min P(route) to accept a skill
+  floor:        float (default 0.05)  min P(route) to accept a skill
   skills_dir:   str   (default ~/.hermes/skills)
   laya_py:      str   (default ~/.hermes/workspace/laya-venv/bin/python)
   excerpt_chars:int   (default 3000)  per-skill body chars injected
   timeout_s:    float (default 30)
+
+Floor note (from eval_floor.py, 19-task sweep): the confidence floor is a
+NON-discriminating knob for this router — Laya is confidently wrong (mean conf
+of wrong top-1 = 0.917 vs right = 0.894), so raising the floor costs coverage
+without buying precision (F0.5 is flat 0.84 from floor 0 to 0.6). Keep it low
+(~0) and rely on top_n=2 to hedge confident-wrong top-1 picks.
 """
 from __future__ import annotations
 
@@ -71,7 +77,7 @@ def _routed_context(task: str, ctx) -> str:
     if not enabled:
         return ""
     top_n = int(_cfg(ctx, "top_n", 2))
-    floor = float(_cfg(ctx, "floor", 0.25))
+    floor = float(_cfg(ctx, "floor", 0.05))
     skills_dir = _cfg(ctx, "skills_dir", os.path.join(os.path.expanduser("~"), ".hermes", "skills"))
     laya_py = _cfg(ctx, "laya_py", os.path.join(
         os.path.expanduser("~"), ".hermes", "workspace", "laya-venv", "bin", "python"))
@@ -141,7 +147,7 @@ def _cmd_status(raw_args: str = "") -> str:
     cfg = {
         "enabled": _cfg(_GLOBAL_CTX, "enabled", True),
         "top_n": _cfg(_GLOBAL_CTX, "top_n", 2),
-        "floor": _cfg(_GLOBAL_CTX, "floor", 0.25),
+        "floor": _cfg(_GLOBAL_CTX, "floor", 0.05),
         "excerpt_chars": _cfg(_GLOBAL_CTX, "excerpt_chars", 3000),
     }
     return "\n".join(f"{k}: {v}" for k, v in cfg.items())
