@@ -32,12 +32,37 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from . import router as _router_mod
 
 PLUGIN_IDENT = "skill_router"
 _GLOBAL_CTX = None
+
+# Audit log: every routing decision is appended (JSONL) so we can score real
+# production accuracy later. Fail-open: a logging error never affects routing.
+_AUDIT_PATH = os.path.join(os.path.expanduser("~"), ".hermes", "skill_router_audit.jsonl")
+
+
+def _audit(entry: dict) -> None:
+    try:
+        entry.setdefault("ts", time.time())
+        with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _skip_reason(task: str) -> str:
+    """Why routing produced nothing for `task` (for the audit log)."""
+    try:
+        probe = _router_mod.semif_probe()
+        if not probe.get("available"):
+            return probe.get("reason") or "unavailable"
+        return "no candidate/pick above floor"
+    except Exception as e:
+        return "probe_error: %s" % e
 
 
 def _cfg(ctx, key: str, default):
@@ -101,6 +126,17 @@ def _routed_context(task: str, ctx) -> str:
             str(task), skills_dir=skills_dir, laya_py=laya_py,
             top_n=top_n, floor=floor, timeout=timeout_s,
         )
+    # AUDIT: log the decision (routed picks, or a skip) for later scoring.
+    if routed:
+        _audit({
+            "event": "routed", "task": str(task), "engine": engine,
+            "picks": [{"skill": r["name"], "prob": r.get("probability")} for r in routed],
+        })
+    else:
+        _audit({
+            "event": "skip", "task": str(task), "engine": engine,
+            "reason": _skip_reason(str(task)),
+        })
     if not routed:
         return ""
 
