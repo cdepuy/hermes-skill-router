@@ -46,7 +46,7 @@ def build_questions(task: str, skills: list[dict]) -> dict:
 
 
 def main() -> int:
-    import laya  # only available in laya-venv
+    import laya_mlx as laya  # laya-mlx port (same convaiinnovations/laya weights)
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw)
@@ -64,7 +64,7 @@ def main() -> int:
     state = {"task": task}
     qs = {"route": build_questions(task, skills)}
     try:
-        agent = laya.load("convaiinnovations/laya")
+        agent = laya.load("aac6fef/laya-mlx", dtype="float16")
         r = agent.predict(state, qs)
     except Exception as exc:
         print(json.dumps({"error": f"laya predict failed: {exc}"}))

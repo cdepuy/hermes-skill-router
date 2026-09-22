@@ -72,7 +72,13 @@ def _excerpt(path: str, max_chars: int) -> str:
 
 
 def _routed_context(task: str, ctx) -> str:
-    """Route task -> skill(s), load each, return the injected context block."""
+    """Route task -> skill(s), load each, return the injected context block.
+
+    Uses the SemIf engine by default (engine=config 'engine', default 'semif').
+    The AVAILABILITY GATE (semif_probe) runs first: if the 3080 box is
+    unreachable, the model isn't warmed, or the GPU is busy, routing returns []
+    -> no injection -> the session behaves exactly as stock Hermes (fail-open).
+    """
     enabled = _cfg(ctx, "enabled", True)
     if not enabled:
         return ""
@@ -80,14 +86,21 @@ def _routed_context(task: str, ctx) -> str:
     floor = float(_cfg(ctx, "floor", 0.05))
     skills_dir = _cfg(ctx, "skills_dir", os.path.join(os.path.expanduser("~"), ".hermes", "skills"))
     laya_py = _cfg(ctx, "laya_py", os.path.join(
-        os.path.expanduser("~"), ".hermes", "workspace", "laya-venv", "bin", "python"))
+        os.path.expanduser("~"), ".hermes", "workspace", "laya-mlx-bench", ".venv", "bin", "python"))
     excerpt_chars = int(_cfg(ctx, "excerpt_chars", 3000))
     timeout_s = float(_cfg(ctx, "timeout_s", 30))
+    engine = str(_cfg(ctx, "engine", "semif")).lower()
 
-    routed = _router_mod.route_task(
-        str(task), skills_dir=skills_dir, laya_py=laya_py,
-        top_n=top_n, floor=floor, timeout=timeout_s,
-    )
+    if engine == "semif":
+        # AVAILABILITY GATE is internal to route_task_semif: any miss -> [].
+        routed = _router_mod.route_task_semif(
+            str(task), skills_dir=skills_dir, top_n=top_n, floor=floor,
+        )
+    else:  # 'laya' (legacy) — fallback engine, direct call.
+        routed = _router_mod.route_task(
+            str(task), skills_dir=skills_dir, laya_py=laya_py,
+            top_n=top_n, floor=floor, timeout=timeout_s,
+        )
     if not routed:
         return ""
 
@@ -153,6 +166,16 @@ def _cmd_status(raw_args: str = "") -> str:
     return "\n".join(f"{k}: {v}" for k, v in cfg.items())
 
 
+def _cmd_warm(raw_args: str = "") -> str:
+    """/skill-router-warm — preload the SemIf model on the 3080 box (blocks)."""
+    try:
+        ok = _router_mod.semif_warm()
+        return ("SemIf model warmed OK on 3080." if ok
+                else "SemIf warm FAILED (box down / model load error). Routing stays off until warmed.")
+    except Exception as e:
+        return "SemIf warm ERROR: %s" % e
+
+
 def register(ctx):
     """Register the skill_router plugin: pre_llm_call hook + a route tool."""
     global _GLOBAL_CTX
@@ -165,6 +188,13 @@ def register(ctx):
         "skill-router-status",
         _cmd_status,
         description="Show skill_router config",
+        args_hint="",
+    )
+
+    ctx.register_command(
+        "skill-router-warm",
+        _cmd_warm,
+        description="Preload the SemIf model on the 3080 box (blocks until warm)",
         args_hint="",
     )
 

@@ -21,12 +21,12 @@ import time
 
 from laya_predict import build_questions
 
-_MODEL = "convaiinnovations/laya"
+_MODEL = "aac6fef/laya-mlx"
 
 
 def init_agent():
-    import laya
-    return laya.load(_MODEL)
+    import laya_mlx  # laya-mlx (port of convaiinnovations/laya); same weights
+    return laya_mlx.load("aac6fef/laya-mlx", dtype="float16")
 
 
 def run_job(agent, payload: dict) -> dict:

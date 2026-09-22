@@ -176,3 +176,192 @@ def test_register_is_idempotent_no_network():
     plugin = _load_plugin_under_test()
     fake = FakeCtx()
     plugin.register(fake)  # must not raise with FakeCtx registering hook/tool/command
+
+
+# ---------------------------------------------------------------------------
+# SemIf engine + AVAILABILITY GATE (mocked transport — no network/box needed)
+# ---------------------------------------------------------------------------
+def _mock_probe(available, reason=None, **extra):
+    d = {"available": available, "reason": reason}
+    d.update(extra)
+    return d
+
+
+def test_route_task_semif_unavailable_returns_empty(monkeypatch):
+    # Box unreachable -> gate says unavailable -> [] (revert to normal, no injection).
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(False, reason="box/server unreachable"))
+    assert router.route_task_semif("post to twitter") == []
+
+
+def test_route_task_semif_cold_model_returns_empty(monkeypatch):
+    # Box reachable but model not warmed -> [].
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(False, reason="model not warmed"))
+    assert router.route_task_semif("post to twitter") == []
+
+
+def test_route_task_semif_busy_gpu_returns_empty(monkeypatch):
+    # GPU busy (util above threshold) -> [].
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(False, reason="gpu busy: util=95%"))
+    assert router.route_task_semif("post to twitter") == []
+
+
+def test_route_task_semif_empty_task_returns_empty(monkeypatch):
+    # Whitespace task never even probes -> [].
+    monkeypatch.setattr(router, "semif_probe", lambda: _mock_probe(True))
+    assert router.route_task_semif("   ") == []
+
+
+def test_route_task_semif_available_routes(fake_skills_dir, monkeypatch):
+    # Engine available -> routes through SemIf (mocked server returns probs).
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(True, model_warm=True, gpu_util=5))
+    # Fake the remote route: pick the skill sharing most tokens with the task.
+    def fake_route(task, candidates, top_n=2, floor=0.01):
+        def overlap(s):
+            return len(set(s["name"].replace("-", " ").split())
+                       & set(task.lower().replace("-", " ").split()))
+        ranked = sorted(candidates, key=lambda s: -overlap(s))
+        return [{"skill": ranked[0]["name"], "probability": 0.9}]
+    monkeypatch.setattr(router, "discover_semif_route", fake_route)
+    result = router.route_task_semif("post to twitter", skills_dir=fake_skills_dir)
+    assert result and result[0]["name"] == "x-post"
+    assert result[0]["probability"] == 0.9
+    assert "path" in result[0]
+
+
+def test_semif_probe_mocked_ping_happy(monkeypatch):
+    monkeypatch.setattr(router, "_start_semif_server", lambda: {"proc": object(), "stdin": None, "stdout": object()})
+    monkeypatch.setattr(router, "_semif_ping",
+                        lambda h: {"ping": True, "model_warm": True, "gpu_util": 5, "gpu_mem_used_mb": 4000})
+    p = router.semif_probe()
+    assert p["available"] is True
+    assert p["gpu_util"] == 5
+
+
+def test_semif_probe_gpu_busy_threshold(monkeypatch):
+    # GPU util above the configured max -> unavailable.
+    monkeypatch.setattr(router, "_start_semif_server", lambda: {"proc": object(), "stdin": None, "stdout": object()})
+    monkeypatch.setattr(router, "_semif_ping",
+                        lambda h: {"ping": True, "model_warm": True, "gpu_util": 99, "gpu_mem_used_mb": 4000})
+    p = router.semif_probe()
+    assert p["available"] is False
+    assert "busy" in p["reason"]
+
+
+def test_semif_probe_dead_ping(monkeypatch):
+    # Server up but no ping reply -> unavailable.
+    monkeypatch.setattr(router, "_start_semif_server", lambda: {"proc": object(), "stdin": None, "stdout": object()})
+    monkeypatch.setattr(router, "_semif_ping", lambda h: None)
+    p = router.semif_probe()
+    assert p["available"] is False
+
+
+def test_readline_timeout_returns_none_on_dead_stream():
+    # A stream that never produces a line -> None after timeout (no hang).
+    import io
+    import router as R
+    assert R._readline_timeout(io.StringIO("hello\n"), 0.5) == "hello"
+    assert R._readline_timeout(io.StringIO("\n"), 0.5) is None
+
+
+def test_readline_timeout_bounds_wait():
+    # A stream that blocks long must return None within ~timeout, not hang.
+    import router as R
+    import threading, time
+    import io
+
+    class Blocking(io.StringIO):
+        def readline(self, *a):
+            time.sleep(30)  # far exceeds the 0.3s budget
+            return "late\n"
+
+    t0 = time.time()
+    got = R._readline_timeout(Blocking(), 0.3)
+    el = time.time() - t0
+    assert got is None
+    assert el < 3.0  # bounded, not the 30s block
+
+
+def test_discover_semif_route_ranks_and_respects_floor(monkeypatch):
+    # SemIf returns {option_ids, probabilities}; discover_semif_route uses floor+top_n.
+    monkeypatch.setattr(router, "_semif_server_or_raise", lambda: {"proc": object()})
+    monkeypatch.setattr(router, "_semif_route",
+                        lambda h, task, options, max_tokens=4096: {
+                            "option_ids": ["a", "b", "c"],
+                            "probabilities": [0.7, 0.2, 0.1],
+                        })
+    fake_skills = [
+        {"name": "a", "description": "aaa"}, {"name": "b", "description": "bbb"},
+        {"name": "c", "description": "ccc"},
+    ]
+    out = router.discover_semif_route("task", fake_skills, top_n=2, floor=0.15)
+    assert out == [{"skill": "a", "probability": 0.7}, {"skill": "b", "probability": 0.2}]
+
+
+def test_discover_semif_route_too_many_options_raises(monkeypatch):
+    # SemIf caps at 16 options; >16 must fail closed via SemIfUnavailable.
+    many = [{"name": "s%02d" % i, "description": "d"} for i in range(17)]
+    import pytest as _pt
+    with _pt.raises(router.SemIfUnavailable):
+        router.discover_semif_route("task", many)
+
+
+def test_discover_semif_route_server_fail_raises(monkeypatch):
+    monkeypatch.setattr(router, "_semif_server_or_raise", lambda: {"proc": object()})
+    monkeypatch.setattr(router, "_semif_route", lambda h, t, o, max_tokens=4096: {"error": "model load failed"})
+    import pytest as _pt
+    with _pt.raises(router.SemIfUnavailable):
+        router.discover_semif_route("post to x", [{"name": "x-post", "description": "d"}])
+
+
+def test_route_task_semif_cold_model_triggers_background_warm(monkeypatch):
+    # Cold but reachable -> returns [] AND kicks a background warm (no stall).
+    warmed = []
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(False, reason="model not warmed"))
+    monkeypatch.setattr(router, "_background_warm", lambda: warmed.append(True))
+    assert router.route_task_semif("post to twitter") == []
+    assert warmed == [True]
+
+
+def test_route_task_semif_unreachable_does_not_warm(monkeypatch):
+    # Unreachable -> [] and NO warm attempt.
+    warmed = []
+    monkeypatch.setattr(router, "semif_probe",
+                        lambda: _mock_probe(False, reason="box/server unreachable"))
+    monkeypatch.setattr(router, "_background_warm", lambda: warmed.append(True))
+    assert router.route_task_semif("post to twitter") == []
+    assert warmed == []
+
+
+def test_semif_warm_wrapper(monkeypatch):
+    # Warm success + failure map to bool.
+    monkeypatch.setattr(router, "_semif_warm_sync", lambda: {"warmed": True})
+    assert router.semif_warm() is True
+    monkeypatch.setattr(router, "_semif_warm_sync", lambda: {"warmed": False, "error": "x"})
+    assert router.semif_warm() is False
+
+
+def test_background_warm_guards_duplicate(monkeypatch):
+    # _background_warm only starts one thread at a time (idempotent guard).
+    import router as R
+    starts = []
+    monkeypatch.setattr(R, "_BG_WARM_STARTED", False)
+    # Replace the thread-target with a recorder WITHOUT actually starting a thread.
+    monkeypatch.setattr(R, "_semif_warm_sync", lambda: starts.append(1))
+    # Stub threading.Thread within router to just set the flag (no real thread).
+    class _FakeThread:
+        def __init__(self, *a, **k):
+            pass
+        def start(self):
+            R._BG_WARM_STARTED = True
+    monkeypatch.setattr(R, "threading", type("_thr", (), {"Thread": _FakeThread}))
+    R._background_warm()
+    R._background_warm()
+    assert len(starts) == 1  # second call is guarded by _BG_WARM_STARTED
+    R._BG_WARM_STARTED = False
+
+
